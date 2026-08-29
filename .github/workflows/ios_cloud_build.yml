@@ -5,8 +5,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "BibleReadShare_Flutter_V1_2_PWA_ANDROID.zip"
-      - ".github/workflows/bible_android_pwa_release.yml"
+      - "BibleReadShare_Flutter_V1_2_1_NETWORK_FIX.zip"
+      - ".github/workflows/ios_cloud_build.yml"
 
 permissions:
   contents: read
@@ -35,7 +35,7 @@ jobs:
         run: |
           rm -rf app
           mkdir app
-          unzip -q BibleReadShare_Flutter_V1_2_PWA_ANDROID.zip -d app
+          unzip -q BibleReadShare_Flutter_V1_2_1_NETWORK_FIX.zip -d app
 
       - name: Generate platform files
         working-directory: app
@@ -46,6 +46,43 @@ jobs:
             --project-name bible_read_share \
             .
           rm -rf test
+
+      - name: Enable Android Internet permission
+        working-directory: app
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          text = manifest.read_text(encoding="utf-8")
+          permission = '<uses-permission android:name="android.permission.INTERNET" />'
+
+          if 'android.permission.INTERNET' not in text:
+              text = re.sub(
+                  r'(<manifest\b[^>]*>)',
+                  r'\1\n    ' + permission,
+                  text,
+                  count=1,
+              )
+              manifest.write_text(text, encoding="utf-8")
+
+          print(manifest.read_text(encoding="utf-8"))
+          PY
+
+          grep -q 'android.permission.INTERNET' \
+            android/app/src/main/AndroidManifest.xml
+
+      - name: Verify Supabase host
+        run: |
+          python3 - <<'PY'
+          import socket
+          host = "fwvsospcusbuksdihcbs.supabase.co"
+          results = socket.getaddrinfo(host, 443)
+          if not results:
+              raise SystemExit("Supabase DNS lookup failed")
+          print("Supabase DNS OK:", results[0][4][0])
+          PY
 
       - name: Configure web identity
         working-directory: app
@@ -69,7 +106,10 @@ jobs:
 
           index = Path("web/index.html")
           text = index.read_text(encoding="utf-8")
-          text = text.replace("<title>bible_read_share</title>", "<title>함께읽는성경</title>")
+          text = text.replace(
+              "<title>bible_read_share</title>",
+              "<title>함께읽는성경</title>",
+          )
           index.write_text(text, encoding="utf-8")
           PY
 
@@ -96,7 +136,8 @@ jobs:
           rm -rf _site
           mkdir -p _site/app
           cp -R app/build/web/* _site/app/
-          cp app/build/app/outputs/flutter-apk/app-release.apk _site/BibleReadShare-Android.apk
+          cp app/build/app/outputs/flutter-apk/app-release.apk \
+            _site/BibleReadShare-Android.apk
 
           cat > _site/index.html <<'HTML'
           <!doctype html>
@@ -139,7 +180,7 @@ jobs:
             <section id="iphoneBox" class="card hidden">
               <h2>iPhone / iPad</h2>
               <a class="btn iphone" href="./app/">iPhone에서 성경앱 열기</a>
-              <div class="note">Safari에서 연 뒤 공유 버튼 → 「홈 화면에 추가」를 누르면 일반 앱처럼 사용할 수 있습니다. Apple 연회비는 필요하지 않습니다.</div>
+              <div class="note">Safari에서 연 뒤 공유 버튼 → 「홈 화면에 추가」를 누르면 일반 앱처럼 사용할 수 있습니다.</div>
             </section>
 
             <section id="otherBox" class="card hidden">
@@ -152,7 +193,9 @@ jobs:
             const ua = navigator.userAgent || "";
             const isIOS = /iPhone|iPad|iPod/i.test(ua);
             const isAndroid = /Android/i.test(ua);
-            document.getElementById(isIOS ? "iphoneBox" : isAndroid ? "androidBox" : "otherBox").classList.remove("hidden");
+            document.getElementById(
+              isIOS ? "iphoneBox" : isAndroid ? "androidBox" : "otherBox"
+            ).classList.remove("hidden");
           </script>
           </body>
           </html>
