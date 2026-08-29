@@ -1,20 +1,20 @@
-name: Build Android APK and Deploy PWA
+name: BibleReadShare Auto Release
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - "BibleReadShare_Flutter_V1_2_1_NETWORK_FIX.zip"
+      - "app/**"
       - ".github/workflows/ios_cloud_build.yml"
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
-  group: bible-distribution
+  group: bible-auto-release
   cancel-in-progress: true
 
 jobs:
@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -31,13 +33,31 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Extract Flutter source
+      - name: Bootstrap source once from ZIP
+        shell: bash
         run: |
-          rm -rf app
-          mkdir app
-          unzip -q BibleReadShare_Flutter_V1_2_1_NETWORK_FIX.zip -d app
+          if [ ! -f app/pubspec.yaml ]; then
+            echo "First run: extracting current source into app/"
+            rm -rf app
+            mkdir app
+            unzip -q BibleReadShare_Flutter_V1_2_1_NETWORK_FIX.zip -d app
 
-      - name: Generate platform files
+            # Keep only source/config files needed for ongoing development.
+            rm -rf app/.github
+            rm -f app/bible_android_pwa_release*.yml
+            rm -f app/codemagic.yaml
+            rm -f app/setup_windows.ps1
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add app
+            git commit -m "chore: bootstrap Flutter source for automatic releases" || true
+            git push origin main || true
+          else
+            echo "app/ source already exists; no bootstrap needed."
+          fi
+
+      - name: Generate Android and Web platform files
         working-directory: app
         run: |
           flutter create \
@@ -47,7 +67,7 @@ jobs:
             .
           rm -rf test
 
-      - name: Enable Android Internet permission
+      - name: Configure Android network and app identity
         working-directory: app
         run: |
           python3 - <<'PY'
@@ -56,8 +76,8 @@ jobs:
 
           manifest = Path("android/app/src/main/AndroidManifest.xml")
           text = manifest.read_text(encoding="utf-8")
-          permission = '<uses-permission android:name="android.permission.INTERNET" />'
 
+          permission = '<uses-permission android:name="android.permission.INTERNET" />'
           if 'android.permission.INTERNET' not in text:
               text = re.sub(
                   r'(<manifest\b[^>]*>)',
@@ -65,26 +85,118 @@ jobs:
                   text,
                   count=1,
               )
-              manifest.write_text(text, encoding="utf-8")
 
-          print(manifest.read_text(encoding="utf-8"))
+          text = text.replace(
+              'android:label="bible_read_share"',
+              'android:label="함께읽는성경"',
+          )
+          manifest.write_text(text, encoding="utf-8")
+
+          if 'android.permission.INTERNET' not in text:
+              raise SystemExit("INTERNET permission missing")
           PY
 
-          grep -q 'android.permission.INTERNET' \
-            android/app/src/main/AndroidManifest.xml
+      - name: Restore permanent Android signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        working-directory: app
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
 
-      - name: Verify Supabase host
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode \
+            > android/bible-release-key.jks
+
+          cat > android/key.properties <<EOF
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyPassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=bibleupload
+          storeFile=../bible-release-key.jks
+          EOF
+
+      - name: Configure permanent release signing
+        working-directory: app
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/build.gradle.kts")
+          text = p.read_text(encoding="utf-8")
+
+          preamble = """import java.util.Properties
+          import java.io.FileInputStream
+
+          val keystoreProperties = Properties()
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
+
+          """.replace("          ", "")
+
+          if "val keystoreProperties = Properties()" not in text:
+              text = preamble + text
+
+          signing = """
+              signingConfigs {
+                  create("release") {
+                      keyAlias = keystoreProperties["keyAlias"] as String
+                      keyPassword = keystoreProperties["keyPassword"] as String
+                      storeFile = keystoreProperties["storeFile"]?.let { file(it) }
+                      storePassword = keystoreProperties["storePassword"] as String
+                  }
+              }
+
+          """
+
+          if 'create("release")' not in text:
+              marker = "    buildTypes {"
+              if marker not in text:
+                  raise SystemExit("buildTypes marker missing")
+              text = text.replace(marker, signing + marker, 1)
+
+          text = text.replace(
+              'signingConfig = signingConfigs.getByName("debug")',
+              'signingConfig = signingConfigs.getByName("release")'
+          )
+
+          p.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Verify Supabase DNS
         run: |
           python3 - <<'PY'
           import socket
           host = "fwvsospcusbuksdihcbs.supabase.co"
-          results = socket.getaddrinfo(host, 443)
-          if not results:
+          result = socket.getaddrinfo(host, 443)
+          if not result:
               raise SystemExit("Supabase DNS lookup failed")
-          print("Supabase DNS OK:", results[0][4][0])
+          print("Supabase DNS OK")
           PY
 
-      - name: Configure web identity
+      - name: Get packages
+        working-directory: app
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build permanently signed Android APK
+        working-directory: app
+        run: |
+          flutter build apk --release \
+            --build-number="${GITHUB_RUN_NUMBER}"
+
+      - name: Verify APK signature
+        working-directory: app
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs \
+            build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Configure Web PWA identity
         working-directory: app
         run: |
           python3 - <<'PY'
@@ -95,10 +207,8 @@ jobs:
           manifest = json.loads(manifest_path.read_text())
           manifest["name"] = "함께읽는성경"
           manifest["short_name"] = "함께읽는성경"
-          manifest["description"] = "성경 읽기 진도와 기도제목을 가족·교회·친구와 함께 나누는 앱"
+          manifest["description"] = "성경 읽기 진도와 기도제목을 함께 나누는 앱"
           manifest["display"] = "standalone"
-          manifest["background_color"] = "#FFF9F0"
-          manifest["theme_color"] = "#6B2737"
           manifest_path.write_text(
               json.dumps(manifest, ensure_ascii=False, indent=2),
               encoding="utf-8",
@@ -113,28 +223,17 @@ jobs:
           index.write_text(text, encoding="utf-8")
           PY
 
-      - name: Get packages
-        working-directory: app
-        run: flutter pub get
-
-      - name: Analyze
-        working-directory: app
-        run: flutter analyze --no-fatal-infos
-
-      - name: Build Android APK
-        working-directory: app
-        run: flutter build apk --release
-
-      - name: Build Flutter Web PWA
+      - name: Build Web PWA
         working-directory: app
         run: |
           flutter build web --release \
             --base-href /bible-read-share/app/
 
-      - name: Prepare Pages site
+      - name: Prepare fixed-URL distribution site
         run: |
           rm -rf _site
           mkdir -p _site/app
+
           cp -R app/build/web/* _site/app/
           cp app/build/app/outputs/flutter-apk/app-release.apk \
             _site/BibleReadShare-Android.apk
@@ -145,58 +244,34 @@ jobs:
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width,initial-scale=1">
-            <meta name="theme-color" content="#6B2737">
             <title>함께읽는성경 설치</title>
-            <style>
-              *{box-sizing:border-box}
-              body{margin:0;background:#fff9f0;color:#2b2623;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans KR",Arial,sans-serif}
-              main{max-width:620px;margin:0 auto;padding:28px 18px 48px}
-              .hero{background:#6b2737;color:white;border-radius:22px;padding:26px 20px}
-              h1{font-size:28px;margin:0 0 8px}
-              .sub{opacity:.9;line-height:1.5}
-              .card{background:white;border:1px solid #eadfd7;border-radius:18px;padding:18px;margin-top:16px;box-shadow:0 4px 18px rgba(60,30,30,.05)}
-              .btn{display:block;text-align:center;text-decoration:none;border-radius:14px;padding:15px 16px;font-size:17px;font-weight:700;margin-top:10px}
-              .android{background:#37704f;color:white}
-              .iphone{background:#6b2737;color:white}
-              .secondary{border:1px solid #6b2737;color:#6b2737;background:#fff}
-              .note{font-size:14px;color:#786e68;line-height:1.6;margin-top:10px}
-              .hidden{display:none}
-            </style>
           </head>
-          <body>
-          <main>
-            <section class="hero">
-              <h1>📖 함께읽는성경</h1>
-              <div class="sub">말씀 읽기 진도와 기도제목을 가족·교회·친구와 함께 나눠보세요.</div>
-            </section>
+          <body style="font-family:sans-serif;max-width:620px;margin:0 auto;padding:30px">
+            <h1>📖 함께읽는성경</h1>
 
-            <section id="androidBox" class="card hidden">
+            <div id="android" style="display:none">
               <h2>Android</h2>
-              <a class="btn android" href="./BibleReadShare-Android.apk">Android 앱 다운로드</a>
-              <a class="btn secondary" href="./app/">웹앱으로 바로 사용</a>
-              <div class="note">처음 설치할 때 브라우저의 「이 출처의 앱 설치 허용」 확인이 필요할 수 있습니다.</div>
-            </section>
+              <p><a href="./BibleReadShare-Android.apk">Android 앱 다운로드</a></p>
+            </div>
 
-            <section id="iphoneBox" class="card hidden">
+            <div id="ios" style="display:none">
               <h2>iPhone / iPad</h2>
-              <a class="btn iphone" href="./app/">iPhone에서 성경앱 열기</a>
-              <div class="note">Safari에서 연 뒤 공유 버튼 → 「홈 화면에 추가」를 누르면 일반 앱처럼 사용할 수 있습니다.</div>
-            </section>
+              <p><a href="./app/">iPhone에서 성경앱 열기</a></p>
+              <p>Safari → 공유 → 홈 화면에 추가</p>
+            </div>
 
-            <section id="otherBox" class="card hidden">
-              <h2>설치 방법 선택</h2>
-              <a class="btn android" href="./BibleReadShare-Android.apk">Android APK</a>
-              <a class="btn iphone" href="./app/">iPhone / 웹앱</a>
-            </section>
-          </main>
-          <script>
-            const ua = navigator.userAgent || "";
-            const isIOS = /iPhone|iPad|iPod/i.test(ua);
-            const isAndroid = /Android/i.test(ua);
-            document.getElementById(
-              isIOS ? "iphoneBox" : isAndroid ? "androidBox" : "otherBox"
-            ).classList.remove("hidden");
-          </script>
+            <div id="other" style="display:none">
+              <p><a href="./BibleReadShare-Android.apk">Android APK</a></p>
+              <p><a href="./app/">iPhone / 웹앱</a></p>
+            </div>
+
+            <script>
+              const ua = navigator.userAgent || "";
+              const id =
+                /iPhone|iPad|iPod/i.test(ua) ? "ios" :
+                /Android/i.test(ua) ? "android" : "other";
+              document.getElementById(id).style.display = "block";
+            </script>
           </body>
           </html>
           HTML
