@@ -1,14 +1,28 @@
-name: iOS Cloud Build From ZIP
+name: Build Android APK and Deploy PWA
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "BibleReadShare_Flutter_V1_2_PWA_ANDROID.zip"
+      - ".github/workflows/bible_android_pwa_release.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: bible-distribution
+  cancel-in-progress: true
 
 jobs:
-  ios:
-    runs-on: macos-14
+  build:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Flutter
@@ -17,31 +31,47 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Extract Flutter project
+      - name: Extract Flutter source
         run: |
           rm -rf app
           mkdir app
-          unzip -q BibleReadShare_Flutter_V1_1_PHONE_ONLY_IOS.zip -d app
+          unzip -q BibleReadShare_Flutter_V1_2_PWA_ANDROID.zip -d app
 
-      - name: Generate iOS and Android platform files
+      - name: Generate platform files
         working-directory: app
         run: |
           flutter create \
-            --platforms=android,ios \
+            --platforms=android,web \
             --org com.biblereadshare \
             --project-name bible_read_share \
             .
-
-      - name: Remove generated default test
-        working-directory: app
-        run: |
           rm -rf test
 
-      - name: Set iOS identity
+      - name: Configure web identity
         working-directory: app
         run: |
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 함께읽는성경" ios/Runner/Info.plist
-          sed -i '' -E 's/PRODUCT_BUNDLE_IDENTIFIER = [^;]+;/PRODUCT_BUNDLE_IDENTIFIER = com.biblereadshare.app;/g' ios/Runner.xcodeproj/project.pbxproj
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path("web/manifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          manifest["name"] = "함께읽는성경"
+          manifest["short_name"] = "함께읽는성경"
+          manifest["description"] = "성경 읽기 진도와 기도제목을 가족·교회·친구와 함께 나누는 앱"
+          manifest["display"] = "standalone"
+          manifest["background_color"] = "#FFF9F0"
+          manifest["theme_color"] = "#6B2737"
+          manifest_path.write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2),
+              encoding="utf-8",
+          )
+
+          index = Path("web/index.html")
+          text = index.read_text(encoding="utf-8")
+          text = text.replace("<title>bible_read_share</title>", "<title>함께읽는성경</title>")
+          index.write_text(text, encoding="utf-8")
+          PY
 
       - name: Get packages
         working-directory: app
@@ -51,19 +81,99 @@ jobs:
         working-directory: app
         run: flutter analyze --no-fatal-infos
 
-      - name: Build iOS without signing
+      - name: Build Android APK
         working-directory: app
-        run: flutter build ios --release --no-codesign
+        run: flutter build apk --release
 
-      - name: Pack unsigned iOS app
+      - name: Build Flutter Web PWA
         working-directory: app
         run: |
-          cd build/ios/iphoneos
-          zip -r Runner-unsigned.zip Runner.app
+          flutter build web --release \
+            --base-href /bible-read-share/app/
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Prepare Pages site
+        run: |
+          rm -rf _site
+          mkdir -p _site/app
+          cp -R app/build/web/* _site/app/
+          cp app/build/app/outputs/flutter-apk/app-release.apk _site/BibleReadShare-Android.apk
+
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="ko">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <meta name="theme-color" content="#6B2737">
+            <title>함께읽는성경 설치</title>
+            <style>
+              *{box-sizing:border-box}
+              body{margin:0;background:#fff9f0;color:#2b2623;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans KR",Arial,sans-serif}
+              main{max-width:620px;margin:0 auto;padding:28px 18px 48px}
+              .hero{background:#6b2737;color:white;border-radius:22px;padding:26px 20px}
+              h1{font-size:28px;margin:0 0 8px}
+              .sub{opacity:.9;line-height:1.5}
+              .card{background:white;border:1px solid #eadfd7;border-radius:18px;padding:18px;margin-top:16px;box-shadow:0 4px 18px rgba(60,30,30,.05)}
+              .btn{display:block;text-align:center;text-decoration:none;border-radius:14px;padding:15px 16px;font-size:17px;font-weight:700;margin-top:10px}
+              .android{background:#37704f;color:white}
+              .iphone{background:#6b2737;color:white}
+              .secondary{border:1px solid #6b2737;color:#6b2737;background:#fff}
+              .note{font-size:14px;color:#786e68;line-height:1.6;margin-top:10px}
+              .hidden{display:none}
+            </style>
+          </head>
+          <body>
+          <main>
+            <section class="hero">
+              <h1>📖 함께읽는성경</h1>
+              <div class="sub">말씀 읽기 진도와 기도제목을 가족·교회·친구와 함께 나눠보세요.</div>
+            </section>
+
+            <section id="androidBox" class="card hidden">
+              <h2>Android</h2>
+              <a class="btn android" href="./BibleReadShare-Android.apk">Android 앱 다운로드</a>
+              <a class="btn secondary" href="./app/">웹앱으로 바로 사용</a>
+              <div class="note">처음 설치할 때 브라우저의 「이 출처의 앱 설치 허용」 확인이 필요할 수 있습니다.</div>
+            </section>
+
+            <section id="iphoneBox" class="card hidden">
+              <h2>iPhone / iPad</h2>
+              <a class="btn iphone" href="./app/">iPhone에서 성경앱 열기</a>
+              <div class="note">Safari에서 연 뒤 공유 버튼 → 「홈 화면에 추가」를 누르면 일반 앱처럼 사용할 수 있습니다. Apple 연회비는 필요하지 않습니다.</div>
+            </section>
+
+            <section id="otherBox" class="card hidden">
+              <h2>설치 방법 선택</h2>
+              <a class="btn android" href="./BibleReadShare-Android.apk">Android APK</a>
+              <a class="btn iphone" href="./app/">iPhone / 웹앱</a>
+            </section>
+          </main>
+          <script>
+            const ua = navigator.userAgent || "";
+            const isIOS = /iPhone|iPad|iPod/i.test(ua);
+            const isAndroid = /Android/i.test(ua);
+            document.getElementById(isIOS ? "iphoneBox" : isAndroid ? "androidBox" : "otherBox").classList.remove("hidden");
+          </script>
+          </body>
+          </html>
+          HTML
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: BibleReadShare-iOS-unsigned
-          path: app/build/ios/iphoneos/Runner-unsigned.zip
-          retention-days: 14
+          path: _site
+
+  deploy-pages:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
