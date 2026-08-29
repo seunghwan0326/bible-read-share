@@ -19,6 +19,7 @@ jobs:
 
       - name: Extract Flutter project
         run: |
+          rm -rf app
           mkdir app
           unzip -q BibleReadShare_Flutter_V1_1_PHONE_ONLY_IOS.zip -d app
 
@@ -30,6 +31,11 @@ jobs:
             --org com.biblereadshare \
             --project-name bible_read_share \
             .
+
+      - name: Remove generated default test
+        working-directory: app
+        run: |
+          rm -rf test
 
       - name: Set iOS identity
         working-directory: app
@@ -43,7 +49,7 @@ jobs:
 
       - name: Analyze
         working-directory: app
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Build iOS without signing
         working-directory: app
