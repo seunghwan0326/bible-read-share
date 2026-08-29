@@ -1,0 +1,13 @@
+{
+  "project": "BibleReadShare",
+  "platforms": [
+    "android",
+    "ios"
+  ],
+  "source": "Flutter",
+  "ported_from": "BibleReadShare_V1_3_4_MULTIROOM_CODEASSIST.caproj",
+  "backend": "Supabase bible_*_v13",
+  "version": "1.1.0",
+  "workflow": "android-phone-only-to-ios-cloud",
+  "ios_bundle_id": "com.biblereadshare.app"
+}
