@@ -1,0 +1,63 @@
+name: iOS Cloud Build From ZIP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Extract Flutter project
+        run: |
+          mkdir app
+          unzip -q BibleReadShare_Flutter_V1_1_PHONE_ONLY_IOS.zip -d app
+
+      - name: Generate iOS and Android platform files
+        working-directory: app
+        run: |
+          flutter create \
+            --platforms=android,ios \
+            --org com.biblereadshare \
+            --project-name bible_read_share \
+            .
+
+      - name: Set iOS identity
+        working-directory: app
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 함께읽는성경" ios/Runner/Info.plist
+          sed -i '' -E 's/PRODUCT_BUNDLE_IDENTIFIER = [^;]+;/PRODUCT_BUNDLE_IDENTIFIER = com.biblereadshare.app;/g' ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Get packages
+        working-directory: app
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze
+
+      - name: Build iOS without signing
+        working-directory: app
+        run: flutter build ios --release --no-codesign
+
+      - name: Pack unsigned iOS app
+        working-directory: app
+        run: |
+          cd build/ios/iphoneos
+          zip -r Runner-unsigned.zip Runner.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BibleReadShare-iOS-unsigned
+          path: app/build/ios/iphoneos/Runner-unsigned.zip
+          retention-days: 14
